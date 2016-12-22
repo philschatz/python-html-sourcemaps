@@ -1,0 +1,7 @@
+#! /bin/sh
+python main.py --source-map out.html.map input.html out.html || exit 1
+
+$(npm bin)/sourcemap-lookup out.html:1:0
+$(npm bin)/sourcemap-lookup out.html:4:6
+
+# Note: The whitespace is not mapped back to the source (yet)

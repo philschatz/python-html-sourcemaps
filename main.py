@@ -7,6 +7,7 @@ import logging
 import sys
 import contextlib
 import base64
+import json
 
 # Force python XML parser not faster C accelerators
 # because we can't hook the C implementation
@@ -35,7 +36,7 @@ class LineNumberingParser(ET.XMLParser):
         # Here we assume the default XML parser which is expat
         # and copy its element position attributes into output Elements
         element = super(self.__class__, self)._start_list(*args, **kwargs)
-        print("open", self.parser.CurrentLineNumber, self.parser.CurrentColumnNumber)
+        # print("OPEN", self.parser.CurrentLineNumber, self.parser.CurrentColumnNumber)
         element._start_line_number = self.parser.CurrentLineNumber
         element._start_column_number = self.parser.CurrentColumnNumber
         element._start_byte_index = self.parser.CurrentByteIndex
@@ -43,7 +44,7 @@ class LineNumberingParser(ET.XMLParser):
 
     def _end(self, *args, **kwargs):
         element = super(self.__class__, self)._end(*args, **kwargs)
-        print("close", self.parser.CurrentLineNumber, self.parser.CurrentColumnNumber)
+        # print("CLOSE", self.parser.CurrentLineNumber, self.parser.CurrentColumnNumber)
         element._end_line_number = self.parser.CurrentLineNumber
         element._end_column_number = self.parser.CurrentColumnNumber
         element._end_byte_index = self.parser.CurrentByteIndex
@@ -188,6 +189,14 @@ class SourceMapGenerator:
         """Return string."""
         return ',\n'.join(str(x) for x in self._mappings)
 
+    def to_json(self):
+        obj = dict()
+        obj['version'] = 3
+        obj['sources'] = self._sources
+        if len(self._names) > 0:
+            obj['names'] = self._names
+        obj['mappings'] = self.serializeMappings()
+        return json.dumps(obj)
 
     def addMapping(self, mapping):
         if (mapping.generatedLine == 0):
@@ -200,10 +209,11 @@ class SourceMapGenerator:
         except ValueError:
             self._sources.append(mapping.source)
 
-        try:
-            self._names.index(mapping.name)
-        except ValueError:
-            self._names.append(mapping.name)
+        if mapping.name is not None:
+            try:
+                self._names.index(mapping.name)
+            except ValueError:
+                self._names.append(mapping.name)
 
     def serializeMappings(self):
         """
@@ -237,7 +247,7 @@ class SourceMapGenerator:
           if (mapping.generatedLine != previousGeneratedLine):
             previousGeneratedColumn = 0
             while (mapping.generatedLine != previousGeneratedLine):
-              nextStr += ''
+              nextStr += ';'
               previousGeneratedLine+=1
 
           else:
@@ -468,7 +478,7 @@ def _namespaces(elem, default_namespace=None):
     return qnames, namespaces
 
 
-def writeXML(smap, root_node, file_or_filename,
+def writeXML(input_filename, smap, root_node, file_or_filename,
           encoding=None,
           xml_declaration=None,
           default_namespace=None,
@@ -514,32 +524,30 @@ def writeXML(smap, root_node, file_or_filename,
         else:
             qnames, namespaces = _namespaces(root_node, default_namespace)
             pos = (1, 0) # Lines are 1-based (but so are maybe columns?)
-            _serialize_xml(smap, write, root_node, qnames, namespaces, pos,
+            _serialize_xml(input_filename, smap, write, root_node, qnames, namespaces, pos,
                       short_empty_elements=short_empty_elements)
 
 
-def _serialize_xml(smap, write, elem, qnames, namespaces, pos,
+def _serialize_xml(input_filename, smap, write, elem, qnames, namespaces, pos,
                    short_empty_elements, **kwargs):
 
     def __writer(pos, node, text):
         (line_num, column_num) = pos
-        pos = adjust_pos(line_num, column_num, text)
-        # TODO: Print to the sourcemapper
-        print("serialize", line_num, column_num)
-        smap.addMapping(Mapping(source='input.html', generatedLine=line_num, generatedColumn=column_num, originalLine=node._start_line_number, originalColumn=node._start_column_number, name='start_'+node.tag))
+        # print("SERIALIZE", line_num, column_num)
+        smap.addMapping(Mapping(source=input_filename, generatedLine=line_num, generatedColumn=column_num, originalLine=node._start_line_number, originalColumn=node._start_column_number))
 
         write(text)
+        pos = adjust_pos(line_num, column_num, text)
         return pos
 
     def __writer_end(pos, node, text):
         """ used for close tags """
         (line_num, column_num) = pos
-        pos = adjust_pos(line_num, column_num, text)
-        # TODO: Print to the sourcemapper
-        print("serializeEnd", line_num, column_num)
-        smap.addMapping(Mapping(source='input.html', generatedLine=line_num, generatedColumn=column_num, originalLine=node._end_line_number, originalColumn=node._end_column_number, name='end_'+node.tag))
+        # print("SERIALIZE_END", line_num, column_num)
+        smap.addMapping(Mapping(source=input_filename, generatedLine=line_num, generatedColumn=column_num, originalLine=node._end_line_number, originalColumn=node._end_column_number))
 
         write(text)
+        pos = adjust_pos(line_num, column_num, text)
         return pos
 
     tag = elem.tag
@@ -554,7 +562,7 @@ def _serialize_xml(smap, write, elem, qnames, namespaces, pos,
             if text:
                 pos = __writer(pos, elem, _escape_cdata(text))
             for e in elem:
-                _serialize_xml(smap, write, e, qnames, None, pos,
+                _serialize_xml(input_filename, smap, write, e, qnames, None, pos,
                                short_empty_elements=short_empty_elements)
         else:
             pos = __writer(pos, elem, "<" + tag)
@@ -582,7 +590,7 @@ def _serialize_xml(smap, write, elem, qnames, namespaces, pos,
                 if text:
                     pos = __writer(pos, elem, _escape_cdata(text))
                 for e in elem:
-                    _serialize_xml(smap, write, e, qnames, None, pos,
+                    _serialize_xml(input_filename, smap, write, e, qnames, None, pos,
                                    short_empty_elements=short_empty_elements)
                 pos = __writer_end(pos, elem, "</" + tag + ">")
             else:
@@ -604,10 +612,10 @@ def convert_file(html_in, html_out, source_map, source_map_input):
 
     # serialize out HTML
     # print(etree.tostring(html_doc, method="html"), file=html_out)
-    writeXML(smap, html_doc.getroot(), html_out)
+    writeXML(html_in.name, smap, html_doc.getroot(), html_out)
 
     print("SOURCEMAP_STR", str(smap))
-    print("SAMPLE_MAPPINGS", smap.serializeMappings())
+    print(smap.to_json(), file=source_map)
 
 
 def main(argv=None):
