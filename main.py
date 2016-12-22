@@ -15,6 +15,16 @@ import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import QName, Comment, ProcessingInstruction
 
 
+def adjust_pos(line_num, column_num, str):
+    """ Keeps track of the line/column when serializing
+        This is used for the output sourcemap file
+    """
+    lines = str.splitlines()
+    line_num += len(lines)
+    column_num = len(lines[:1]) + 1 # Columns are 1-based???
+    return (line_num, column_num)
+
+
 class LineNumberingParser(ET.XMLParser):
     """ Record the line and column numbers for elements (to create a sourcemap later)
     TODO: also record line/column information for attribute names, values, and text nodes
@@ -37,6 +47,116 @@ class LineNumberingParser(ET.XMLParser):
         element._end_column_number = self.parser.CurrentColumnNumber
         element._end_byte_index = self.parser.CurrentByteIndex
         return element
+
+
+# Ported from https://github.com/mozilla/source-map/blob/master/lib/base64-vlq.js
+
+# A single base 64 digit can contain 6 bits of data. For the base 64 variable
+# length quantities we use in the source map spec, the first bit is the sign,
+# the next four bits are the actual value, and the 6th bit is the
+# continuation bit. The continuation bit tells us whether there are more
+# digits in this value following this digit.
+#
+#   Continuation
+#   |    Sign
+#   |    |
+#   V    V
+#   101011
+VLQ_BASE_SHIFT = 5
+# binary: 100000
+VLQ_BASE = 1 << VLQ_BASE_SHIFT
+# binary: 011111
+VLQ_BASE_MASK = VLQ_BASE - 1
+# binary: 100000
+VLQ_CONTINUATION_BIT = VLQ_BASE
+
+def toVLQSigned(aValue):
+  """
+   Converts from a two-complement value to a value where the sign bit is
+   placed in the least significant bit.  For example, as decimals:
+     1 becomes 2 (10 binary), -1 becomes 3 (11 binary)
+     2 becomes 4 (100 binary), -2 becomes 5 (101 binary)
+  """
+  # return aValue < 0
+  #   ? ((-aValue) << 1) + 1
+  #   : (aValue << 1) + 0
+  return ((-aValue) << 1) + 1 if aValue < 0 else (aValue << 1) + 0
+
+
+def fromVLQSigned(aValue):
+  """
+   Converts to a two-complement value from a value where the sign bit is
+   placed in the least significant bit.  For example, as decimals:
+     2 (10 binary) becomes 1, 3 (11 binary) becomes -1
+     4 (100 binary) becomes 2, 5 (101 binary) becomes -2
+  """
+  isNegative = (aValue & 1) == 1
+  shifted = aValue >> 1
+  return -shifted if isNegative else shifted
+
+
+# From http://stackoverflow.com/a/30238073
+def rshift(val, n):
+    s = val & 0x80000000
+    for i in range(0,n):
+        val >>= 1
+        val |= s
+    return val
+
+def base64VLQ_encode(aValue):
+  """
+   Returns the base 64 VLQ encoded value.
+  """
+  encoded = ""
+  digit
+
+  vlq = toVLQSigned(aValue)
+
+  condition = True
+  while condition:
+    digit = vlq & VLQ_BASE_MASK
+    # vlq >>>= VLQ_BASE_SHIFT
+    vlq = rshift(vlq, VLQ_BASE_SHIFT)
+    if (vlq > 0):
+      # There are still more digits in this value, so we must make sure the
+      # continuation bit is marked.
+      # digit |= VLQ_CONTINUATION_BIT
+      digit = digit | VLQ_CONTINUATION_BIT
+
+    encoded += base64.encode(digit)
+    condition = (vlq > 0)
+
+  return encoded
+
+
+# def base64VLQ_decode(aStr, aIndex, aOutParam):
+# """
+#  Decodes the next base 64 VLQ value from the given string and returns the
+#  value and the rest of the string via the out parameter.
+# """
+#   strLen = aStr.length
+#   result = 0
+#   shift = 0
+#   continuation, digit
+#
+#   do:
+#     if (aIndex >= strLen):
+#       throw new Error("Expected more digits in base 64 VLQ value.")
+#
+#     digit = base64.decode(aStr.charCodeAt(aIndex++))
+#     if (digit == -1):
+#       throw new Error("Invalid base64 digit: " + aStr.charAt(aIndex - 1))
+#
+#     continuation = !!(digit & VLQ_CONTINUATION_BIT)
+#     digit &= VLQ_BASE_MASK
+#     result = result + (digit << shift)
+#     shift += VLQ_BASE_SHIFT
+#    while (continuation)
+#
+#   aOutParam.value = fromVLQSigned(result)
+#   aOutParam.rest = aIndex
+
+
 
 
 @contextlib.contextmanager
@@ -243,28 +363,48 @@ def write(root_node, file_or_filename,
         else:
             qnames, namespaces = _namespaces(root_node, default_namespace)
             serialize = _serialize_xml
-            serialize(write, root_node, qnames, namespaces,
+            pos = (0, 0)
+            serialize(write, root_node, qnames, namespaces, pos,
                       short_empty_elements=short_empty_elements)
 
 
-def _serialize_xml(write, elem, qnames, namespaces,
+def _serialize_xml(write, elem, qnames, namespaces, pos,
                    short_empty_elements, **kwargs):
+
+    def __writer(pos, node, text):
+        (line_num, column_num) = pos
+        pos = adjust_pos(line_num, column_num, text)
+        # TODO: Print to the sourcemapper
+        print("serialize", node._start_line_number, node._start_column_number)
+
+        write(text)
+        return pos
+
+    def __writer_end(pos, node, text):
+        """ used for close tags """
+        (line_num, column_num) = pos
+        pos = adjust_pos(line_num, column_num, text)
+        # TODO: Print to the sourcemapper
+        print("serializeEnd", node._end_line_number, node._end_column_number)
+        write(text)
+        return pos
+
     tag = elem.tag
     text = elem.text
     if tag is Comment:
-        write("<!--%s-->" % text)
+        pos = __writer(pos, elem, "<!--%s-->" % text)
     elif tag is ProcessingInstruction:
-        write("<?%s?>" % text)
+        pos = __writer(pos, elem, "<?%s?>" % text)
     else:
         tag = qnames[tag]
         if tag is None:
             if text:
-                write(_escape_cdata(text))
+                pos = __writer(pos, elem, _escape_cdata(text))
             for e in elem:
-                _serialize_xml(write, e, qnames, None,
+                _serialize_xml(write, e, qnames, None, pos,
                                short_empty_elements=short_empty_elements)
         else:
-            write("<" + tag)
+            pos = __writer(pos, elem, "<" + tag)
             items = list(elem.items())
             if items or namespaces:
                 if namespaces:
@@ -272,7 +412,7 @@ def _serialize_xml(write, elem, qnames, namespaces,
                                        key=lambda x: x[1]):  # sort on prefix
                         if k:
                             k = ":" + k
-                        write(" xmlns%s=\"%s\"" % (
+                        pos = __writer(pos, elem, " xmlns%s=\"%s\"" % (
                             k,
                             _escape_attrib(v)
                             ))
@@ -283,19 +423,19 @@ def _serialize_xml(write, elem, qnames, namespaces,
                         v = qnames[v.text]
                     else:
                         v = _escape_attrib(v)
-                    write(" %s=\"%s\"" % (qnames[k], v))
+                    pos = __writer(pos, elem, " %s=\"%s\"" % (qnames[k], v))
             if text or len(elem) or not short_empty_elements:
-                write(">")
+                pos = __writer(pos, elem, ">")
                 if text:
-                    write(_escape_cdata(text))
+                    pos = __writer(pos, elem, _escape_cdata(text))
                 for e in elem:
-                    _serialize_xml(write, e, qnames, None,
+                    _serialize_xml(write, e, qnames, None, pos,
                                    short_empty_elements=short_empty_elements)
-                write("</" + tag + ">")
+                pos = __writer_end(pos, elem, "</" + tag + ">")
             else:
-                write(" />")
+                pos = __writer_end(pos, elem, " />")
     if elem.tail:
-        write(_escape_cdata(elem.tail))
+        pos = __writer(pos, elem, _escape_cdata(elem.tail))
 
 
 
