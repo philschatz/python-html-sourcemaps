@@ -21,8 +21,8 @@ def adjust_pos(line_num, column_num, str):
         This is used for the output sourcemap file
     """
     lines = str.splitlines()
-    line_num += len(lines)
-    column_num = len(lines[:1]) + 1 # Columns are 1-based???
+    line_num += len(lines) - 1
+    column_num = len(lines[-1]) + 1 # Columns are 1-based???
     return (line_num, column_num)
 
 
@@ -59,6 +59,11 @@ class Mapping:
         self.originalColumn = originalColumn
         self.source = source
         self.name = name
+    def __str__(self):
+        """Return string."""
+        return (u"[source: {0.source} gen:{0.generatedLine},{0.generatedColumn} "
+                u"orig:{0.originalLine},{0.originalColumn} name:{0.name}]".format(self))
+
 
 
 # Ported from https://github.com/mozilla/source-map/blob/master/lib/base64-vlq.js
@@ -173,75 +178,110 @@ def base64VLQ_encode(aValue):
 
 
 # From https://github.com/mozilla/source-map/blob/master/lib/source-map-generator.js#L286
-def SourceMapGenerator_serializeMappings(mappings, sources):
-    """
-     * Serialize the accumulated mappings in to the stream of base 64 VLQs
-     * specified by the source map format.
-    """
-    previousGeneratedColumn = 0
-    previousGeneratedLine = 1
-    previousOriginalColumn = 0
-    previousOriginalLine = 0
-    previousName = 0
-    previousSource = 0
-    result = ''
+class SourceMapGenerator:
+    def __init__(self):
+        self._mappings = []
+        self._sources = []
+        self._names = []
 
-    nextStr = ''
-    mapping = None
-    nameIdx = -1
-    sourceIdx = -1
+    def __str__(self):
+        """Return string."""
+        return ',\n'.join(str(x) for x in self._mappings)
 
-    i = -1
-    # mappings = this._mappings.toArray()
-    # for (i = 0, len = mappings.length i < len i++):
-    #   mapping = mappings[i]
-    for mapping in mappings:
-      i += 1
 
-      nextStr = ''
+    def addMapping(self, mapping):
+        if (mapping.generatedLine == 0):
+          raise ValueError('Mapping contains invalid generatedLine. Line numbers are 1-based')
+        self._mappings.append(mapping)
+        self._mappings = sorted(self._mappings, key=lambda x: x.generatedLine)
 
-      if (mapping.generatedLine != previousGeneratedLine):
+        try:
+            self._sources.index(mapping.source)
+        except ValueError:
+            self._sources.append(mapping.source)
+
+        try:
+            self._names.index(mapping.name)
+        except ValueError:
+            self._names.append(mapping.name)
+
+    def serializeMappings(self):
+        """
+         * Serialize the accumulated mappings in to the stream of base 64 VLQs
+         * specified by the source map format.
+        """
         previousGeneratedColumn = 0
-        while (mapping.generatedLine != previousGeneratedLine):
-          nextStr += ''
-          previousGeneratedLine+=1
+        previousGeneratedLine = 1
+        previousOriginalColumn = 0
+        previousOriginalLine = 0
+        previousName = 0
+        previousSource = 0
+        result = ''
 
-      else:
-        if (i > 0):
-          if (not util_compareByGeneratedPositionsInflated(mapping, mappings[i - 1])):
-            continue
+        nextStr = ''
+        mapping = None
+        nameIdx = -1
+        sourceIdx = -1
 
-          nextStr += ','
+        i = -1
+        # mappings = this._mappings.toArray()
+        # for (i = 0, len = mappings.length i < len i++):
+        #   mapping = mappings[i]
+        for mapping in self._mappings:
+          i += 1
 
-      nextStr += base64VLQ_encode(mapping.generatedColumn
-                                 - previousGeneratedColumn)
-      previousGeneratedColumn = mapping.generatedColumn
+          nextStr = ''
 
-      if (mapping.source is not None):
-        # sourceIdx = this._sources.indexOf(mapping.source)
-        sourceIdx = sources.index(mapping.source)
-        nextStr += base64VLQ_encode(sourceIdx - previousSource)
-        previousSource = sourceIdx
+          if (mapping.generatedLine == 0):
+              raise ValueError('Mapping contains invalid generatedLine. Line numbers are 1-based')
+          if (mapping.generatedLine != previousGeneratedLine):
+            previousGeneratedColumn = 0
+            while (mapping.generatedLine != previousGeneratedLine):
+              nextStr += ''
+              previousGeneratedLine+=1
 
-        # lines are stored 0-based in SourceMap spec version 3
-        nextStr += base64VLQ_encode(mapping.originalLine - 1
-                                   - previousOriginalLine)
-        previousOriginalLine = mapping.originalLine - 1
+          else:
+            if (i > 0):
+              if (not util_compareByGeneratedPositionsInflated(mapping, self._mappings[i - 1])):
+                continue
 
-        nextStr += base64VLQ_encode(mapping.originalColumn
-                                   - previousOriginalColumn)
-        previousOriginalColumn = mapping.originalColumn
+              nextStr += ','
 
-        if (mapping.name is not None):
-          nameIdx = this._names.indexOf(mapping.name)
-          nextStr += base64VLQ_encode(nameIdx - previousName)
-          previousName = nameIdx
+          nextStr += base64VLQ_encode(mapping.generatedColumn
+                                     - previousGeneratedColumn)
+          previousGeneratedColumn = mapping.generatedColumn
 
-      result += nextStr
+          if (mapping.source is not None):
+            # sourceIdx = this._sources.indexOf(mapping.source)
+            sourceIdx = self._sources.index(mapping.source)
+            nextStr += base64VLQ_encode(sourceIdx - previousSource)
+            previousSource = sourceIdx
 
-    return result
+            # lines are stored 0-based in SourceMap spec version 3
+            nextStr += base64VLQ_encode(mapping.originalLine - 1
+                                       - previousOriginalLine)
+            previousOriginalLine = mapping.originalLine - 1
+
+            nextStr += base64VLQ_encode(mapping.originalColumn
+                                       - previousOriginalColumn)
+            previousOriginalColumn = mapping.originalColumn
+
+            if (mapping.name is not None):
+              nameIdx = self._names.index(mapping.name)
+              nextStr += base64VLQ_encode(nameIdx - previousName)
+              previousName = nameIdx
+
+          result += nextStr
+
+        return result
 
 # From https://github.com/mozilla/source-map/blob/master/lib/util.js#L385
+def strcmp(aStr1, aStr2):
+  if (aStr1 == aStr2):
+    return 0
+  if (aStr1 > aStr2):
+    return 1
+  return -1
 def util_compareByGeneratedPositionsInflated(mappingA, mappingB):
   """
    * Comparator between two mappings with inflated source and name strings where
@@ -428,7 +468,7 @@ def _namespaces(elem, default_namespace=None):
     return qnames, namespaces
 
 
-def write(root_node, file_or_filename,
+def writeXML(smap, root_node, file_or_filename,
           encoding=None,
           xml_declaration=None,
           default_namespace=None,
@@ -473,20 +513,20 @@ def write(root_node, file_or_filename,
             _serialize_text(write, root_node)
         else:
             qnames, namespaces = _namespaces(root_node, default_namespace)
-            serialize = _serialize_xml
-            pos = (0, 0)
-            serialize(write, root_node, qnames, namespaces, pos,
+            pos = (1, 0) # Lines are 1-based (but so are maybe columns?)
+            _serialize_xml(smap, write, root_node, qnames, namespaces, pos,
                       short_empty_elements=short_empty_elements)
 
 
-def _serialize_xml(write, elem, qnames, namespaces, pos,
+def _serialize_xml(smap, write, elem, qnames, namespaces, pos,
                    short_empty_elements, **kwargs):
 
     def __writer(pos, node, text):
         (line_num, column_num) = pos
         pos = adjust_pos(line_num, column_num, text)
         # TODO: Print to the sourcemapper
-        print("serialize", node._start_line_number, node._start_column_number)
+        print("serialize", line_num, column_num)
+        smap.addMapping(Mapping(source='input.html', generatedLine=line_num, generatedColumn=column_num, originalLine=node._start_line_number, originalColumn=node._start_column_number, name='start_'+node.tag))
 
         write(text)
         return pos
@@ -496,7 +536,9 @@ def _serialize_xml(write, elem, qnames, namespaces, pos,
         (line_num, column_num) = pos
         pos = adjust_pos(line_num, column_num, text)
         # TODO: Print to the sourcemapper
-        print("serializeEnd", node._end_line_number, node._end_column_number)
+        print("serializeEnd", line_num, column_num)
+        smap.addMapping(Mapping(source='input.html', generatedLine=line_num, generatedColumn=column_num, originalLine=node._end_line_number, originalColumn=node._end_column_number, name='end_'+node.tag))
+
         write(text)
         return pos
 
@@ -512,7 +554,7 @@ def _serialize_xml(write, elem, qnames, namespaces, pos,
             if text:
                 pos = __writer(pos, elem, _escape_cdata(text))
             for e in elem:
-                _serialize_xml(write, e, qnames, None, pos,
+                _serialize_xml(smap, write, e, qnames, None, pos,
                                short_empty_elements=short_empty_elements)
         else:
             pos = __writer(pos, elem, "<" + tag)
@@ -540,7 +582,7 @@ def _serialize_xml(write, elem, qnames, namespaces, pos,
                 if text:
                     pos = __writer(pos, elem, _escape_cdata(text))
                 for e in elem:
-                    _serialize_xml(write, e, qnames, None, pos,
+                    _serialize_xml(smap, write, e, qnames, None, pos,
                                    short_empty_elements=short_empty_elements)
                 pos = __writer_end(pos, elem, "</" + tag + ">")
             else:
@@ -558,9 +600,14 @@ def convert_file(html_in, html_out, source_map, source_map_input):
     # oven = Oven(css_in, use_repeatable_ids)
     # oven.bake(html_doc, last_step)
 
+    smap = SourceMapGenerator()
+
     # serialize out HTML
     # print(etree.tostring(html_doc, method="html"), file=html_out)
-    write(html_doc.getroot(), html_out)
+    writeXML(smap, html_doc.getroot(), html_out)
+
+    print("SOURCEMAP_STR", str(smap))
+    print("SAMPLE_MAPPINGS", smap.serializeMappings())
 
 
 def main(argv=None):
@@ -585,14 +632,6 @@ def main(argv=None):
     parser.add_argument('-d', '--debug', action='store_true',
                         help='Send debugging info to stderr')
     args = parser.parse_args(argv)
-
-    sources = ['foo.html']
-    mappings = [
-        Mapping(generatedLine=1, generatedColumn=1, source='foo.html', originalLine=1, originalColumn=1),
-        Mapping(generatedLine=2, generatedColumn=1, source='foo.html', originalLine=1, originalColumn=2),
-        Mapping(generatedLine=20, generatedColumn=10, source='foo.html', originalLine=10, originalColumn=20)
-    ]
-    print("SAMPLE_MAPPINGS", SourceMapGenerator_serializeMappings(mappings, sources))
 
     convert_file(args.html_in, args.html_out, args.source_map, args.source_map_input)
 
