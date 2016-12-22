@@ -6,6 +6,7 @@ import argparse
 import logging
 import sys
 import contextlib
+import base64
 
 # Force python XML parser not faster C accelerators
 # because we can't hook the C implementation
@@ -47,6 +48,17 @@ class LineNumberingParser(ET.XMLParser):
         element._end_column_number = self.parser.CurrentColumnNumber
         element._end_byte_index = self.parser.CurrentByteIndex
         return element
+
+
+class Mapping:
+    def __init__(self, generatedLine=None, generatedColumn=None, source=None, originalLine=None, originalColumn=None, name=None):
+        """Mapping Object (contains a single mapping)"""
+        self.generatedLine = generatedLine
+        self.generatedColumn = generatedColumn
+        self.originalLine = originalLine
+        self.originalColumn = originalColumn
+        self.source = source
+        self.name = name
 
 
 # Ported from https://github.com/mozilla/source-map/blob/master/lib/base64-vlq.js
@@ -103,12 +115,14 @@ def rshift(val, n):
         val |= s
     return val
 
+intToCharMap = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
 def base64VLQ_encode(aValue):
   """
    Returns the base 64 VLQ encoded value.
   """
   encoded = ""
-  digit
+  digit = 0
 
   vlq = toVLQSigned(aValue)
 
@@ -123,7 +137,8 @@ def base64VLQ_encode(aValue):
       # digit |= VLQ_CONTINUATION_BIT
       digit = digit | VLQ_CONTINUATION_BIT
 
-    encoded += base64.encode(digit)
+    # encoded += base64.encode(digit)
+    encoded += intToCharMap[digit]
     condition = (vlq > 0)
 
   return encoded
@@ -143,7 +158,7 @@ def base64VLQ_encode(aValue):
 #     if (aIndex >= strLen):
 #       throw new Error("Expected more digits in base 64 VLQ value.")
 #
-#     digit = base64.decode(aStr.charCodeAt(aIndex++))
+#     digit = base64.decode(aStr.charCodeAt(aIndex+=1))
 #     if (digit == -1):
 #       throw new Error("Invalid base64 digit: " + aStr.charAt(aIndex - 1))
 #
@@ -157,6 +172,102 @@ def base64VLQ_encode(aValue):
 #   aOutParam.rest = aIndex
 
 
+# From https://github.com/mozilla/source-map/blob/master/lib/source-map-generator.js#L286
+def SourceMapGenerator_serializeMappings(mappings, sources):
+    """
+     * Serialize the accumulated mappings in to the stream of base 64 VLQs
+     * specified by the source map format.
+    """
+    previousGeneratedColumn = 0
+    previousGeneratedLine = 1
+    previousOriginalColumn = 0
+    previousOriginalLine = 0
+    previousName = 0
+    previousSource = 0
+    result = ''
+
+    nextStr = ''
+    mapping = None
+    nameIdx = -1
+    sourceIdx = -1
+
+    i = -1
+    # mappings = this._mappings.toArray()
+    # for (i = 0, len = mappings.length i < len i++):
+    #   mapping = mappings[i]
+    for mapping in mappings:
+      i += 1
+
+      nextStr = ''
+
+      if (mapping.generatedLine != previousGeneratedLine):
+        previousGeneratedColumn = 0
+        while (mapping.generatedLine != previousGeneratedLine):
+          nextStr += ''
+          previousGeneratedLine+=1
+
+      else:
+        if (i > 0):
+          if (not util_compareByGeneratedPositionsInflated(mapping, mappings[i - 1])):
+            continue
+
+          nextStr += ','
+
+      nextStr += base64VLQ_encode(mapping.generatedColumn
+                                 - previousGeneratedColumn)
+      previousGeneratedColumn = mapping.generatedColumn
+
+      if (mapping.source is not None):
+        # sourceIdx = this._sources.indexOf(mapping.source)
+        sourceIdx = sources.index(mapping.source)
+        nextStr += base64VLQ_encode(sourceIdx - previousSource)
+        previousSource = sourceIdx
+
+        # lines are stored 0-based in SourceMap spec version 3
+        nextStr += base64VLQ_encode(mapping.originalLine - 1
+                                   - previousOriginalLine)
+        previousOriginalLine = mapping.originalLine - 1
+
+        nextStr += base64VLQ_encode(mapping.originalColumn
+                                   - previousOriginalColumn)
+        previousOriginalColumn = mapping.originalColumn
+
+        if (mapping.name is not None):
+          nameIdx = this._names.indexOf(mapping.name)
+          nextStr += base64VLQ_encode(nameIdx - previousName)
+          previousName = nameIdx
+
+      result += nextStr
+
+    return result
+
+# From https://github.com/mozilla/source-map/blob/master/lib/util.js#L385
+def util_compareByGeneratedPositionsInflated(mappingA, mappingB):
+  """
+   * Comparator between two mappings with inflated source and name strings where
+   * the generated positions are compared.
+  """
+  cmp = mappingA.generatedLine - mappingB.generatedLine
+  if (cmp != 0):
+    return cmp
+
+  cmp = mappingA.generatedColumn - mappingB.generatedColumn
+  if (cmp != 0):
+    return cmp
+
+  cmp = strcmp(mappingA.source, mappingB.source)
+  if (cmp != 0):
+    return cmp
+
+  cmp = mappingA.originalLine - mappingB.originalLine
+  if (cmp != 0):
+    return cmp
+
+  cmp = mappingA.originalColumn - mappingB.originalColumn
+  if (cmp != 0):
+    return cmp
+
+  return strcmp(mappingA.name, mappingB.name)
 
 
 @contextlib.contextmanager
@@ -474,6 +585,14 @@ def main(argv=None):
     parser.add_argument('-d', '--debug', action='store_true',
                         help='Send debugging info to stderr')
     args = parser.parse_args(argv)
+
+    sources = ['foo.html']
+    mappings = [
+        Mapping(generatedLine=1, generatedColumn=1, source='foo.html', originalLine=1, originalColumn=1),
+        Mapping(generatedLine=2, generatedColumn=1, source='foo.html', originalLine=1, originalColumn=2),
+        Mapping(generatedLine=20, generatedColumn=10, source='foo.html', originalLine=10, originalColumn=20)
+    ]
+    print("SAMPLE_MAPPINGS", SourceMapGenerator_serializeMappings(mappings, sources))
 
     convert_file(args.html_in, args.html_out, args.source_map, args.source_map_input)
 
